@@ -143,13 +143,11 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
 
         if ([uploadType isEqualToString:@"multipart"]) {
             NSString *uuidStr = [[NSUUID UUID] UUIDString];
-            [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
-
             NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI fieldName:fieldName];
+          
             [request setHTTPBody: httpBody];
 
-            // I am sorry about warning, but Upload tasks from NSData are not supported in background sessions.
-            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromData: nil];
+            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
         } else {
             uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
         }
@@ -186,22 +184,13 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
 
     NSMutableData *httpBody = [NSMutableData data];
 
-    // resolve path
-    NSURL *fileUri = [NSURL URLWithString: path];
-    NSString *pathWithoutProtocol = [fileUri path];
-
-    NSData *data = [[NSFileManager defaultManager] contentsAtPath:pathWithoutProtocol];
-
     NSString *filename  = [path lastPathComponent];
     NSString *mimetype  = [self guessMIMETypeFromFileName:path];
+    
 
     [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
     [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"; filename=\"%@\"\r\n", fieldName, filename] dataUsingEncoding:NSUTF8StringEncoding]];
     [httpBody appendData:[[NSString stringWithFormat:@"Content-Type: %@\r\n\r\n", mimetype] dataUsingEncoding:NSUTF8StringEncoding]];
-    [httpBody appendData:data];
-    [httpBody appendData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
-
-    [httpBody appendData:[[NSString stringWithFormat:@"--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
 
     return httpBody;
 }
