@@ -11,6 +11,7 @@
 #import <React/RCTEventEmitter.h>
 #import <React/RCTBridgeModule.h>
 
+
 @interface VydiaRNFileUploader : RCTEventEmitter <RCTBridgeModule, NSURLSessionTaskDelegate>
 {
   NSMutableDictionary *_responsesData;
@@ -26,6 +27,8 @@ static int uploadId = 0;
 static RCTEventEmitter* staticEventEmitter = nil;
 static NSString *BACKGROUND_SESSION_ID = @"VydiaRNFileUploader";
 NSURLSession *_urlSession = nil;
+NSURL *resultFile;
+NSString *locationStr;
 
 -(id) init {
   self = [super init];
@@ -43,12 +46,7 @@ NSURLSession *_urlSession = nil;
 }
 
 - (NSArray<NSString *> *)supportedEvents {
-    return @[
-        @"RNFileUploader-progress",
-        @"RNFileUploader-error",
-        @"RNFileUploader-cancelled",
-        @"RNFileUploader-completed"
-    ];
+    return @[@"RNFileUploader-progress", @"RNFileUploader-error", @"RNFileUploader-completed"];
 }
 
 /*
@@ -84,6 +82,7 @@ RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)r
         resolve(params);
     }
     @catch (NSException *exception) {
+        NSLog(@"RNUploader error %@", exception);
         reject(@"RN Uploader", exception.name, nil);
     }
 }
@@ -125,9 +124,12 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
     NSString *fieldName = options[@"field"];
     NSString *customUploadId = options[@"customUploadId"];
     NSDictionary *headers = options[@"headers"];
+    
+    NSLog(@"uploadUrl: %@", uploadUrl);
 
     @try {
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString: uploadUrl]];
+        
         [request setHTTPMethod: method];
 
         [headers enumerateKeysAndObjectsUsingBlock:^(id  _Nonnull key, id  _Nonnull val, BOOL * _Nonnull stop) {
@@ -143,56 +145,70 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
 
         if ([uploadType isEqualToString:@"multipart"]) {
             NSString *uuidStr = [[NSUUID UUID] UUIDString];
-            NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI fieldName:fieldName];
-          
-            [request setHTTPBody: httpBody];
-
-            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
+            [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
+            [request setValue:[NSString stringWithFormat:@"keep-alive"] forHTTPHeaderField:@"Connection"];
+            [self createBodyWithBoundary:uuidStr path:fileURI fieldName:fieldName];
+            
+            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:resultFile];
         } else {
-            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
+            uploadTask = [[self urlSession:thisUploadId] uploadTaskWithRequest:request fromFile:resultFile];
         }
 
         uploadTask.taskDescription = customUploadId ? customUploadId : [NSString stringWithFormat:@"%i", thisUploadId];
 
         [uploadTask resume];
+
         resolve(uploadTask.taskDescription);
     }
     @catch (NSException *exception) {
+        NSLog(@"RNUploader error %@", exception);
         reject(@"RN Uploader", exception.name, nil);
     }
 }
 
-/*
- * Cancels file upload
- * Accepts upload ID as a first argument, this upload will be cancelled
- * Event "cancelled" will be fired when upload is cancelled.
- */
-RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject) {
-    [_urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-        for (NSURLSessionTask *uploadTask in uploadTasks) {
-            if (uploadTask.taskDescription == cancelUploadId) {
-                [uploadTask cancel];
-            }
-        }
-    }];
-    resolve([NSNumber numberWithBool:YES]);
-}
-
-- (NSData *)createBodyWithBoundary:(NSString *)boundary
+- (void)createBodyWithBoundary:(NSString *)boundary
                          path:(NSString *)path
                          fieldName:(NSString *)fieldName {
 
     NSMutableData *httpBody = [NSMutableData data];
 
+    // resolve path
+   NSURL *fileUri = [NSURL URLWithString: path];
+    NSString *pathWithoutProtocol = [fileUri path];
+    
+    NSData *data = [[NSFileManager defaultManager] contentsAtPath:pathWithoutProtocol];
+    
     NSString *filename  = [path lastPathComponent];
     NSString *mimetype  = [self guessMIMETypeFromFileName:path];
+    locationStr = [path stringByReplacingOccurrencesOfString:@".mov"
+                                                  withString:@".txt"];
+    resultFile = [NSURL URLWithString:locationStr];
+    NSError *fileErr;
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:resultFile error:nil];
     
-
-    [httpBody appendData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
-    [httpBody appendData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"; filename=\"%@\"\r\n", fieldName, filename] dataUsingEncoding:NSUTF8StringEncoding]];
-    [httpBody appendData:[[NSString stringWithFormat:@"Content-Type: %@\r\n\r\n", mimetype] dataUsingEncoding:NSUTF8StringEncoding]];
-
-    return httpBody;
+    /*
+        files over 100MB overload the memory on older devices, and holding the
+        entire request body in memory will cause a crash
+        so here we write the request to a file and upload the file, which
+        will stream the request rather than attempt to send it all at once
+     */
+    
+    if(handle == nil){
+        [[NSFileManager defaultManager] createFileAtPath:locationStr contents:nil attributes:nil];
+        handle = [NSFileHandle fileHandleForWritingToURL:resultFile error:nil];
+    } else {
+        [handle truncateFileAtOffset:0];
+    }
+    
+    [handle seekToEndOfFile];;
+    [handle writeData:[[NSString stringWithFormat:@"--%@\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle writeData:[[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"; filename=\"%@\"\r\n", fieldName, filename] dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle writeData:[[NSString stringWithFormat:@"Content-Type: %@\r\n\r\n", mimetype] dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle writeData:data];
+    [handle writeData:[@"\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    
+    [handle writeData:[[NSString stringWithFormat:@"--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle closeFile];
 }
 
 - (NSURLSession *)urlSession: (int) thisUploadId{
@@ -202,6 +218,7 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
     }    
     return _urlSession;
 }
+
 
 #pragma NSURLSessionTaskDelegate
 
@@ -220,11 +237,12 @@ didCompleteWithError:(NSError *)error {
     if (responseData) {
         [_responsesData removeObjectForKey:@(task.taskIdentifier)];
         NSString *response = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
+        NSLog(@"didCompleteWithError Response: %@", response);
         [data setObject:response forKey:@"responseBody"];
     } else {
         [data setObject:[NSNull null] forKey:@"responseBody"];
     }
-
+    NSLog(@"didCompleteWithError: %@", error);
     if (error == nil)
     {
         [self _sendEventWithName:@"RNFileUploader-completed" body:data];
@@ -232,11 +250,7 @@ didCompleteWithError:(NSError *)error {
     else
     {
         [data setObject:error.localizedDescription forKey:@"error"];
-        if (error.code == NSURLErrorCancelled) {
-            [self _sendEventWithName:@"RNFileUploader-cancelled" body:data];
-        } else {
-            [self _sendEventWithName:@"RNFileUploader-error" body:data];
-        }
+        [self _sendEventWithName:@"RNFileUploader-error" body:data];
     }
 }
 
